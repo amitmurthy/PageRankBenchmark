@@ -1,7 +1,7 @@
 #
-include("KronGraph500NoPerm.jl")
-include("StrFileWrite.jl")
-include("StrFileRead.jl")
+@everywhere include("KronGraph500NoPerm.jl")
+@everywhere include("StrFileWrite.jl")
+@everywhere include("StrFileRead.jl")
 
 function PageRankPipeline(SCALE,EdgesPerVertex,Nfile);
 
@@ -9,9 +9,6 @@ function PageRankPipeline(SCALE,EdgesPerVertex,Nfile);
   M = EdgesPerVertex .* Nmax;                # Total number of edges.
   myFiles = collect(1:Nfile).';              # Set list of files.
   #
-  # Julia parallel version
-  # Figure it out later: how to distribute the load
-  # myFiles = global_ind(zeros(Nfile,1,map([Np 1],{},0:Np-1)));   # PARALLEL.
   tab = Char(9)
   nl = Char(10)
   Niter = 20                                      # Number of PageRank iterations.
@@ -25,17 +22,18 @@ function PageRankPipeline(SCALE,EdgesPerVertex,Nfile);
   ########################################################
   println("Kernel 0: Generate Graph, Write Edges");
   tic();
-    for i in myFiles
+  let SCALE=SCALE,EdgesPerVertex=EdgesPerVertex,Nfile=Nfile
+    pmap(i -> begin
       fname = "data/K0/" * string(i) * ".tsv";
       println("  Writing: " * fname);                          # Read filename.
       srand(i);                                                # Set random seed to be unique for this file.
       ut, vt = KronGraph500NoPerm(SCALE,EdgesPerVertex./Nfile);  # Generate data.
-
       writeuv(fname, ut, vt)
-    end
+      nothing
+    end, myFiles)
+  end
   K0time = toq();
   println("K0 Time: " * string(K0time) * ", Edges/sec: " * string(M./K0time));
-
 
   ########################################################
   # Kernel 1: Read data, sort data, and save to files.
@@ -43,41 +41,76 @@ function PageRankPipeline(SCALE,EdgesPerVertex,Nfile);
   println("Kernel 1: Read, Sort, Write Edges");
   tic();
 
+  # Each worker sorts only a static range of Nmax. TODO: Currently unbalanced, balance it out.
+    u=SharedArray(Int, M)
+    v=SharedArray(Int, M)
+
     # Read in all the files into one array.
-    for i in myFiles
-      fname = "data/K0/" * string(i) * ".tsv";
+    nPerFile = div(M,Nfile)
+    pmap(i->begin
+      fname = "data/K0/" * string(i) * ".tsv"
       println("  Reading: " * fname);  # Read filename.
-      ut,vt = StrFileRead(fname);
+      ut,vt = StrFileRead(fname)
       # Concatenate to u,v
-      if i == 1
-         u = ut; v = vt;
-      else
-         append!(u, ut)
-         append!(v, vt)
-      end
+      startOffset = (i-1)*nPerFile + 1
+      endOffSet = i*nPerFile
+
+      u[startOffset:endOffSet] = ut
+      v[startOffset:endOffSet] = vt
+      nothing
+    end, myFiles)
+
+    rangeInWorker = div(Nmax,nworkers())
+    localsort(i) = begin
+      lb = (i-1)*rangeInWorker + 1
+      ub = i*rangeInWorker
+      idxs = find(x->(x >= lb && x <= ub), u)   # To be sorted on this worker
+
+      lt = (x,y) -> (u[x] < u[y])
+      sorted = sort(idxs; lt=lt)
+
+      f=Future()
+      put!(f, sorted)
+      (f, length(sorted))
     end
 
-    sortIndex = sortperm(u)                      # Sort starting vertices.
-    u = u[sortIndex]                                  # Get starting vertices.
-    v = v[sortIndex]                                  # Get ending vertices.
+    u2=SharedArray(Int, M)
+    v2=SharedArray(Int, M)
+    refs = asyncmap((i,p)->remotecall_fetch(localsort, p, i), 1:nworkers(), workers())
+    offset=1
+
+    for (f,l) in refs
+      let offset=offset
+        remotecall_fetch((f, idx,l) -> begin
+              u2[idx:idx+l-1] = u[fetch(f)]
+              v2[idx:idx+l-1] = v[fetch(f)]
+              nothing
+            end, f.where, f, offset, l)
+      end
+      offset += l
+    end
+
+    u = u2
+    v = v2
+
+
+#    sortIndex = sortperm(u)                      # Sort starting vertices.
+#    u = u[sortIndex]                                  # Get starting vertices.
+#    v = v[sortIndex]                                  # Get ending vertices.
 
   K1time1 = toq();
   tic();
     # Write all the data to files.
-    j = 1;                                                         # Initialize file counter.
     c = size(u,1)/length(myFiles)        # Compute first edge of file.
-    for i in myFiles
-      jEdgeStart = round(Int, (j-1)*c+1)# Compute first edge of file.
-      jEdgeEnd = round(Int, j*c)          # Compute last edge of file.
+    pmap(i -> begin
+      jEdgeStart = round(Int, (i-1)*c+1)# Compute first edge of file.
+      jEdgeEnd = round(Int, i*c)          # Compute last edge of file.
       uu = sub(u,jEdgeStart:jEdgeEnd)                                 # Select start vertices.
       vv = sub(v,jEdgeStart:jEdgeEnd)                                 # Select end vertices.
       fname = "data/K1/" * string(i) * ".tsv"
       println("  Writing: " * fname)                              # Create filename.
-
       writeuv(fname, uu, vv)
-
-      j = j + 1                                                   # Increment file counter.
-    end
+    end, myFiles)
 
   K1time2 = toq();
   K1time = K1time1 + K1time2;
@@ -85,6 +118,7 @@ function PageRankPipeline(SCALE,EdgesPerVertex,Nfile);
   println("K1 Time (writing):" * string(K1time2) * ", Edges/sec: " * string(M./K1time1));
   println("K1 Time: " * string(K1time) * ", Edges/sec: " * string(M./K1time));
 
+exit()
 
   ########################################################
   # Kernel 2: Read data, filter data.

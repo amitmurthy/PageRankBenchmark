@@ -12,7 +12,7 @@ function bsxfun_rdivide(M,Ktime)
    broadcast(./,M,Ktime)
 end
 
-SCALE = collect(10:16)';           # Scale of problem (transpose to match Matlab style).
+SCALE = collect(18:18)';           # Scale of problem (transpose to match Matlab style).
 EdgesPerVertex = 16;        # Average degree of each vertex (power of 2).
 Nfile = 4;                  # Number of files to use (any power of 2).
 Niter = 20;                 # Number of PageRank iterations.
@@ -35,8 +35,8 @@ if PLOTRESULT == 0
    # scale k0-edges-per-sec k1-edges-per-sec k2-edges-per-sec k3-edges-per-sec, tab separated
    header = ["scale", "k0-edges-per-sec", "k1-edges-per-sec", "k2-edges-per-sec", "k3-edges-per-sec" ]
    fid = open("julia.dat","w");
-   writedlm(fid,header.','\t'); 
-   writedlm(fid,[M; Krate].','\t'); 
+   writedlm(fid,header.','\t');
+   writedlm(fid,[M; Krate].','\t');
    close(fid);
 else
    # Julia plot uisng gadfly() aloing with Plots package
